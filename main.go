@@ -162,7 +162,7 @@ func main() {
 			Msg("🚀 JARGO Userbot is ONLINE and listening for 'd' command replies!")
 
 		// 3. Initialize downloader and message handler
-		dl, err := downloader.NewDownloader(rawAPI, cfg.DownloadDir, cfg.ChunkSize, cfg.MaxConcurrentDownloads, log)
+		dl, err := downloader.New(rawAPI, cfg.DownloadDir, cfg.ChunkSize, cfg.MaxConcurrentDownloads, log)
 		if err != nil {
 			log.Error().Err(err).Msg("Failed to initialize chunked downloader")
 			return err
