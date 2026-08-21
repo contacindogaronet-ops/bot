@@ -40,7 +40,7 @@ func New(client *tg.Client, outputDir string, threads int, partSize int, logger 
 	}
 	
 	// Kita abaikan parameter threads karena gotd/downloader sudah menangani concurrency secara internal
-	d := downloader.NewDownloader().WithPartSize(partSize)
+	d := downloader.NewDownloader().WithPartSize(512 * 1024)
 	
 	return &Downloader{
 		client:     client,
