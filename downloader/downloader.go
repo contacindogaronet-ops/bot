@@ -10,6 +10,7 @@ import (
 
 	"github.com/gotd/td/telegram/downloader"
 	"github.com/gotd/td/tg"
+	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
 
@@ -20,7 +21,6 @@ type MediaTarget struct {
 	MimeType string
 }
 
-// 1. Struct disinkronkan persis dengan permintaan dispatcher
 type DownloadProgress struct {
 	DownloadedBytes int64
 	TotalBytes      int64
@@ -33,15 +33,21 @@ type Downloader struct {
 	downloader *downloader.Downloader
 }
 
-func New(client *tg.Client) *Downloader {
-	d := downloader.NewDownloader().WithPartSize(512 * 1024)
+// New sekarang menerima konfigurasi dinamis (partSize) dari main.go dan mereturn error handler
+func New(client *tg.Client, outputDir string, threads int, partSize int, logger zerolog.Logger) (*Downloader, error) {
+	if partSize <= 0 {
+		partSize = 512 * 1024 // Fallback ke 512KB jika kosong
+	}
+	
+	// Kita abaikan parameter threads karena gotd/downloader sudah menangani concurrency secara internal
+	d := downloader.NewDownloader().WithPartSize(partSize)
+	
 	return &Downloader{
 		client:     client,
 		downloader: d,
-	}
+	}, nil
 }
 
-// ResolveMedia mengekstrak info file & lokasi
 func (d *Downloader) ResolveMedia(media tg.MessageMediaClass) (*MediaTarget, error) {
 	if media == nil {
 		return nil, errors.New("pesan tidak memiliki media")
@@ -111,7 +117,6 @@ func (d *Downloader) ResolveMedia(media tg.MessageMediaClass) (*MediaTarget, err
 	}
 }
 
-// 2. Signature fungsi disinkronkan menjadi 3 argumen (tanpa outputDir string)
 func (d *Downloader) DownloadStreams(ctx context.Context, target *MediaTarget, progress func(p DownloadProgress)) (string, error) {
 	if target == nil || target.Location == nil {
 		return "", errors.New("target media invalid")
@@ -136,7 +141,6 @@ func (d *Downloader) DownloadStreams(ctx context.Context, target *MediaTarget, p
 
 	builder := d.downloader.Download(d.client, target.Location)
 
-	// Goroutine Async Poller untuk kalkulasi SpeedBytesSec dan Percentage
 	done := make(chan struct{})
 	if progress != nil {
 		go func() {
