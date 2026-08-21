@@ -20,10 +20,12 @@ type MediaTarget struct {
 	MimeType string
 }
 
+// 1. Struct disinkronkan persis dengan permintaan dispatcher
 type DownloadProgress struct {
-	Transferred int64
-	Total       int64
-	Percent     float64
+	DownloadedBytes int64
+	TotalBytes      int64
+	Percentage      float64
+	SpeedBytesSec   int64
 }
 
 type Downloader struct {
@@ -39,7 +41,7 @@ func New(client *tg.Client) *Downloader {
 	}
 }
 
-// ResolveMedia mengekstrak info file & InputFileLocation dari media pesan Telegram
+// ResolveMedia mengekstrak info file & lokasi
 func (d *Downloader) ResolveMedia(media tg.MessageMediaClass) (*MediaTarget, error) {
 	if media == nil {
 		return nil, errors.New("pesan tidak memiliki media")
@@ -92,15 +94,13 @@ func (d *Downloader) ResolveMedia(media tg.MessageMediaClass) (*MediaTarget, err
 			}
 		}
 
-		loc := &tg.InputPhotoFileLocation{
-			ID:            photo.ID,
-			AccessHash:    photo.AccessHash,
-			FileReference: photo.FileReference,
-			ThumbSize:     thumbType,
-		}
-
 		return &MediaTarget{
-			Location: loc,
+			Location: &tg.InputPhotoFileLocation{
+				ID:            photo.ID,
+				AccessHash:    photo.AccessHash,
+				FileReference: photo.FileReference,
+				ThumbSize:     thumbType,
+			},
 			FileName: fmt.Sprintf("photo_%d.jpg", photo.ID),
 			Size:     0,
 			MimeType: "image/jpeg",
@@ -111,12 +111,13 @@ func (d *Downloader) ResolveMedia(media tg.MessageMediaClass) (*MediaTarget, err
 	}
 }
 
-// DownloadStreams mengunduh file secara chunked stream ke disk
-func (d *Downloader) DownloadStreams(ctx context.Context, target *MediaTarget, outputDir string, progress func(p DownloadProgress)) (string, error) {
+// 2. Signature fungsi disinkronkan menjadi 3 argumen (tanpa outputDir string)
+func (d *Downloader) DownloadStreams(ctx context.Context, target *MediaTarget, progress func(p DownloadProgress)) (string, error) {
 	if target == nil || target.Location == nil {
 		return "", errors.New("target media invalid")
 	}
 
+	outputDir := "downloads"
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		return "", fmt.Errorf("gagal membuat direktori download: %w", err)
 	}
@@ -135,16 +136,53 @@ func (d *Downloader) DownloadStreams(ctx context.Context, target *MediaTarget, o
 
 	builder := d.downloader.Download(d.client, target.Location)
 
+	// Goroutine Async Poller untuk kalkulasi SpeedBytesSec dan Percentage
+	done := make(chan struct{})
+	if progress != nil {
+		go func() {
+			startTime := time.Now()
+			for {
+				select {
+				case <-done:
+					return
+				case <-time.After(1 * time.Second):
+					info, err := os.Stat(destPath)
+					if err == nil {
+						dl := info.Size()
+						elapsed := time.Since(startTime).Seconds()
+						var speed int64
+						if elapsed > 0 {
+							speed = int64(float64(dl) / elapsed)
+						}
+						var pct float64
+						if target.Size > 0 {
+							pct = (float64(dl) / float64(target.Size)) * 100.0
+						}
+						progress(DownloadProgress{
+							DownloadedBytes: dl,
+							TotalBytes:      target.Size,
+							Percentage:      pct,
+							SpeedBytesSec:   speed,
+						})
+					}
+				}
+			}
+		}()
+	}
+
 	if _, err := builder.ToPath(ctx, destPath); err != nil {
+		close(done)
 		log.Error().Err(err).Str("file", destPath).Msg("Stream download terputus")
 		return "", err
 	}
+	close(done)
 
 	if progress != nil {
 		progress(DownloadProgress{
-			Transferred: target.Size,
-			Total:       target.Size,
-			Percent:     100.0,
+			DownloadedBytes: target.Size,
+			TotalBytes:      target.Size,
+			Percentage:      100.0,
+			SpeedBytesSec:   0,
 		})
 	}
 
