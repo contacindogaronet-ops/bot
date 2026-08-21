@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gotd/td/telegram/downloader"
@@ -33,15 +34,8 @@ type Downloader struct {
 	downloader *downloader.Downloader
 }
 
-// New sekarang menerima konfigurasi dinamis (partSize) dari main.go dan mereturn error handler
 func New(client *tg.Client, outputDir string, threads int, partSize int, logger zerolog.Logger) (*Downloader, error) {
-	if partSize <= 0 {
-		partSize = 512 * 1024 // Fallback ke 512KB jika kosong
-	}
-	
-	// Kita abaikan parameter threads karena gotd/downloader sudah menangani concurrency secara internal
 	d := downloader.NewDownloader().WithPartSize(512 * 1024)
-	
 	return &Downloader{
 		client:     client,
 		downloader: d,
@@ -68,8 +62,17 @@ func (d *Downloader) ResolveMedia(media tg.MessageMediaClass) (*MediaTarget, err
 			}
 		}
 
+		// Fix Ekstensi: Deteksi MimeType jika nama file disembunyikan Telegram
 		if fileName == "" {
-			fileName = fmt.Sprintf("doc_%d.bin", doc.ID)
+			ext := ".bin"
+			if doc.MimeType == "video/mp4" {
+				ext = ".mp4"
+			} else if doc.MimeType == "video/webm" {
+				ext = ".webm"
+			} else if strings.HasPrefix(doc.MimeType, "image/") {
+				ext = ".jpg"
+			}
+			fileName = fmt.Sprintf("vid_%d%s", doc.ID, ext)
 		}
 
 		return &MediaTarget{
@@ -122,22 +125,27 @@ func (d *Downloader) DownloadStreams(ctx context.Context, target *MediaTarget, p
 		return "", errors.New("target media invalid")
 	}
 
-	outputDir := "downloads"
+	// 1. Integrasi .env dengan Fallback
+	outputDir := os.Getenv("TG_DOWNLOAD_DIR")
+	if outputDir == "" {
+		outputDir = "downloads"
+	}
+
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		return "", fmt.Errorf("gagal membuat direktori download: %w", err)
 	}
 
 	fileName := target.FileName
-	if fileName == "" {
-		fileName = fmt.Sprintf("file_%d.bin", time.Now().Unix())
-	}
-
-	destPath := filepath.Join(outputDir, fileName)
+	finalPath := filepath.Join(outputDir, fileName)
+	
+	// 2. Sistem Part/Cache: Tambahkan ekstensi .part selama download
+	partPath := finalPath + ".part"
 
 	log.Info().
 		Str("filename", fileName).
+		Str("dir", outputDir).
 		Int64("size", target.Size).
-		Msg("Memulai stream download...")
+		Msg("Memulai stream download caching...")
 
 	builder := d.downloader.Download(d.client, target.Location)
 
@@ -150,7 +158,7 @@ func (d *Downloader) DownloadStreams(ctx context.Context, target *MediaTarget, p
 				case <-done:
 					return
 				case <-time.After(1 * time.Second):
-					info, err := os.Stat(destPath)
+					info, err := os.Stat(partPath)
 					if err == nil {
 						dl := info.Size()
 						elapsed := time.Since(startTime).Seconds()
@@ -174,12 +182,20 @@ func (d *Downloader) DownloadStreams(ctx context.Context, target *MediaTarget, p
 		}()
 	}
 
-	if _, err := builder.ToPath(ctx, destPath); err != nil {
+	// Stream I/O langsung ke file .part
+	if _, err := builder.ToPath(ctx, partPath); err != nil {
 		close(done)
-		log.Error().Err(err).Str("file", destPath).Msg("Stream download terputus")
+		os.Remove(partPath) // Hapus cache .part jika koneksi putus
+		log.Error().Err(err).Str("file", partPath).Msg("Stream terputus")
 		return "", err
 	}
 	close(done)
+
+	// 3. Konversi Cache: Rename .part ke file final secara instan
+	if err := os.Rename(partPath, finalPath); err != nil {
+		log.Error().Err(err).Msg("Gagal menyimpan cache ke file final")
+		return "", err
+	}
 
 	if progress != nil {
 		progress(DownloadProgress{
@@ -190,6 +206,6 @@ func (d *Downloader) DownloadStreams(ctx context.Context, target *MediaTarget, p
 		})
 	}
 
-	log.Info().Str("path", destPath).Msg("Download selesai")
-	return destPath, nil
+	log.Info().Str("path", finalPath).Msg("Download selesai dan cache dihapus")
+	return finalPath, nil
 }
